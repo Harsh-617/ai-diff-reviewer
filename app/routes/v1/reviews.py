@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from app.auth import error_response
 from app.config import MAX_PAYLOAD_BYTES
 from app.db import get_connection
-from app.diff_parser import DiffParseError, parse_diff
+from app.diff_parser import DiffParseError, parse_diff, split_into_chunks
 from app.rules import run_mock_rules
 
 router = APIRouter()
@@ -146,7 +146,7 @@ def _process_job_sync(job_id: str) -> None:
 
             usage = {
                 "inputBytes": len(diff.encode("utf-8")),
-                "chunks": 1,
+                "chunks": len(split_into_chunks(diff)),
                 "cacheHit": False,
             }
             _finalize_job_usage(conn, job_id, usage["inputBytes"], usage["chunks"], usage["cacheHit"])
