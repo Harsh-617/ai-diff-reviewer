@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -20,6 +21,10 @@ DEFAULT_MAX_FINDINGS = 100
 STREAM_POLL_INTERVAL_SECONDS = 0.3
 _SEMAPHORE = asyncio.Semaphore(4)
 _background_tasks: set[asyncio.Task] = set()
+
+# Test-only hook: widens each job's "running" window so tests can observe
+# the semaphore actually bounding concurrency. Inert (0) in production.
+_TEST_PROCESSING_DELAY_SECONDS = 0
 
 
 def _now() -> str:
@@ -138,6 +143,9 @@ def _process_job_sync(job_id: str) -> None:
         _update_job_status(conn, job_id, "running")
         _emit_event(conn, job_id, "status", {"status": "running"})
         conn.commit()
+
+        if _TEST_PROCESSING_DELAY_SECONDS:
+            time.sleep(_TEST_PROCESSING_DELAY_SECONDS)
 
         try:
             parsed_lines = parse_diff(diff)
