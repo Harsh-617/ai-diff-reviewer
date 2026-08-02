@@ -11,6 +11,7 @@ from app.auth import error_response
 from app.config import MAX_PAYLOAD_BYTES
 from app.db import get_connection
 from app.diff_parser import DiffParseError, parse_diff, split_into_chunks
+from app.rate_limit import check_rate_limit
 from app.rules import run_mock_rules
 
 router = APIRouter()
@@ -220,6 +221,10 @@ def _schedule(coro) -> None:
 
 @router.post("/reviews", status_code=202)
 async def create_review(request: Request):
+    rate_limited = await check_rate_limit()
+    if rate_limited is not None:
+        return rate_limited
+
     body = await request.body()
 
     if len(body) > MAX_PAYLOAD_BYTES:
