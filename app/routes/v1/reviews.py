@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from app.auth import error_response
-from app.config import MAX_PAYLOAD_BYTES
+from app.config import MAX_CONCURRENT_JOBS, MAX_PAYLOAD_BYTES
 from app.db import get_connection
 from app.diff_parser import DiffParseError, parse_diff, split_into_chunks
 from app.llm_provider import LLMProviderError, run_llm_review
@@ -20,8 +21,51 @@ router = APIRouter()
 
 DEFAULT_MAX_FINDINGS = 100
 STREAM_POLL_INTERVAL_SECONDS = 0.3
-_SEMAPHORE = asyncio.Semaphore(4)
 _background_tasks: set[asyncio.Task] = set()
+
+# asyncio.Semaphore binds to whichever event loop first awaits it; a plain
+# module-level instance would break the second time any process runs a
+# second event loop (e.g. a subsequent TestClient in the same test session).
+# Lazily (re)create it against the current running loop instead.
+_semaphore: asyncio.Semaphore | None = None
+_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore, _semaphore_loop
+    loop = asyncio.get_running_loop()
+    if _semaphore is None or _semaphore_loop is not loop:
+        _semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+        _semaphore_loop = loop
+    return _semaphore
+
+
+# In-process instrumentation of how many jobs are actively inside the
+# semaphore-guarded processing window right now. Incremented/decremented
+# from both the event loop thread and asyncio.to_thread's worker threads,
+# so access is guarded by a plain threading.Lock (not asyncio.Lock, which
+# only guards a single event loop). Lets tests observe true concurrency
+# in-process instead of inferring it from timing-sensitive HTTP polling.
+_running_count = 0
+_running_count_lock = threading.Lock()
+
+
+def _increment_running_count() -> None:
+    global _running_count
+    with _running_count_lock:
+        _running_count += 1
+
+
+def _decrement_running_count() -> None:
+    global _running_count
+    with _running_count_lock:
+        _running_count -= 1
+
+
+def current_running_count() -> int:
+    with _running_count_lock:
+        return _running_count
+
 
 # Test-only hook: widens each job's "running" window so tests can observe
 # the semaphore actually bounding concurrency. Inert (0) in production.
@@ -224,8 +268,12 @@ def _replay_cached_job_sync(new_job_id: str, cached_job_id: str) -> None:
 
 
 async def _process_job(job_id: str) -> None:
-    async with _SEMAPHORE:
-        await asyncio.to_thread(_process_job_sync, job_id)
+    async with _get_semaphore():
+        _increment_running_count()
+        try:
+            await asyncio.to_thread(_process_job_sync, job_id)
+        finally:
+            _decrement_running_count()
 
 
 async def _replay_cached_job(new_job_id: str, cached_job_id: str) -> None:
