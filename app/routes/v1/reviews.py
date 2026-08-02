@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from app.auth import error_response
 from app.config import MAX_PAYLOAD_BYTES
@@ -15,6 +16,7 @@ from app.rules import run_mock_rules
 router = APIRouter()
 
 DEFAULT_MAX_FINDINGS = 100
+STREAM_POLL_INTERVAL_SECONDS = 0.3
 _SEMAPHORE = asyncio.Semaphore(4)
 _background_tasks: set[asyncio.Task] = set()
 
@@ -314,3 +316,42 @@ async def get_review(job_id: str):
         return response
     finally:
         conn.close()
+
+
+async def _stream_events(job_id: str):
+    last_seq_sent = 0
+    while True:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT seq, event_type, data FROM events WHERE job_id = ? AND seq > ? ORDER BY seq",
+                (job_id, last_seq_sent),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        done_seen = False
+        for row in rows:
+            yield f"event: {row['event_type']}\ndata: {row['data']}\n\n"
+            last_seq_sent = row["seq"]
+            if row["event_type"] == "done":
+                done_seen = True
+
+        if done_seen:
+            return
+
+        await asyncio.sleep(STREAM_POLL_INTERVAL_SECONDS)
+
+
+@router.get("/reviews/{job_id}/stream")
+async def stream_review(job_id: str):
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        raise error_response(404, "not_found", "Job not found")
+
+    return StreamingResponse(_stream_events(job_id), media_type="text/event-stream")
