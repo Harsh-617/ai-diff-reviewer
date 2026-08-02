@@ -12,6 +12,7 @@ from app.auth import error_response
 from app.config import MAX_PAYLOAD_BYTES
 from app.db import get_connection
 from app.diff_parser import DiffParseError, parse_diff, split_into_chunks
+from app.llm_provider import LLMProviderError, run_llm_review
 from app.rate_limit import check_rate_limit
 from app.rules import run_mock_rules
 
@@ -149,7 +150,17 @@ def _process_job_sync(job_id: str) -> None:
 
         try:
             parsed_lines = parse_diff(diff)
-            findings = _sorted_findings(run_mock_rules(parsed_lines))
+
+            if options["provider"] == "llm":
+                try:
+                    findings = _sorted_findings(asyncio.run(run_llm_review(parsed_lines, diff)))
+                except LLMProviderError as exc:
+                    _update_job_status(conn, job_id, "failed", error=str(exc))
+                    _emit_event(conn, job_id, "status", {"status": "failed"})
+                    conn.commit()
+                    return
+            else:
+                findings = _sorted_findings(run_mock_rules(parsed_lines))
 
             for finding in findings:
                 _insert_finding(conn, job_id, finding)
@@ -331,6 +342,18 @@ async def get_review(job_id: str):
         conn.close()
 
 
+def _is_terminal_event(event_type: str, data: str) -> bool:
+    if event_type == "done":
+        return True
+    if event_type == "status":
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            return False
+        return payload.get("status") == "failed"
+    return False
+
+
 async def _stream_events(job_id: str):
     last_seq_sent = 0
     while True:
@@ -343,14 +366,14 @@ async def _stream_events(job_id: str):
         finally:
             conn.close()
 
-        done_seen = False
+        terminal_seen = False
         for row in rows:
             yield f"event: {row['event_type']}\ndata: {row['data']}\n\n"
             last_seq_sent = row["seq"]
-            if row["event_type"] == "done":
-                done_seen = True
+            if _is_terminal_event(row["event_type"], row["data"]):
+                terminal_seen = True
 
-        if done_seen:
+        if terminal_seen:
             return
 
         await asyncio.sleep(STREAM_POLL_INTERVAL_SECONDS)

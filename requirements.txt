@@ -5,3 +5,4 @@ python-dotenv==1.0.1
 unidiff==1.0.0
 pytest==9.1.1
 httpx==0.28.1
+groq==1.1.2
