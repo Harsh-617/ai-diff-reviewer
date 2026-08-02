@@ -59,7 +59,7 @@ All `/v1/*` routes require `Authorization: Bearer <AUTH_TOKEN>`. Full request/re
 pytest
 ```
 
-63 tests passing, covering the diff parser, rule engine, job pipeline, chunking, SSE streaming, rate limiting, concurrency, and the LLM provider.
+67 tests passing, covering the diff parser, rule engine, job pipeline, chunking, SSE streaming, rate limiting, concurrency, and the LLM provider.
 
 ## Architecture
 
